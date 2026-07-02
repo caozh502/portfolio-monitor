@@ -1,12 +1,10 @@
 name: Portfolio Monitor
 
-on:
+"on":
   schedule:
-    # Mon-Fri: check at 09:00 UTC (11:00 CEST) — mid-morning in Europe
     - cron: '0 9 * * 1-5'
-    # Also check at 16:00 UTC (18:00 CEST) — near market close
     - cron: '0 16 * * 1-5'
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:
 
 jobs:
   check:
