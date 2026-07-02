@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """
-Portfolio Monitor v2 — auto-fetch from Trading212, suggest limit sells for profitable positions.
-Runs via GitHub Actions on schedule.
-
-Strategy:
-  - Fetch current portfolio from Trading212 live API
-  - For each position in profit: calculate a limit sell price (near recent high)
-  - Notify via Telegram with actionable suggestions
-  - Only sell profitable positions (user's rule)
+Portfolio Monitor — daily close report.
+Fetches portfolio from Trading212, analyses positions, sends Telegram briefing.
 """
 import json
 import os
@@ -16,68 +10,47 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
-from trading212 import (
-    fetch_portfolio, fetch_cash, enrich_positions,
-)
-
-
-# ── Config overrides via env vars ─────────────────────────
-# On GitHub Actions, set these as secrets
-TRADING212_API_KEY = os.environ.get("TRADING212_API_KEY") or ""
-TRADING212_API_SECRET = os.environ.get("TRADING212_API_SECRET") or ""
+from trading212 import fetch_portfolio, fetch_cash, enrich_positions
 
 
 # ── Price helpers ────────────────────────────────────────
 
-def fetch_price(yahoo_ticker: str) -> float | None:
-    """Fetch current price from Yahoo Finance."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=5d"
+def fetch_today_data(yahoo_ticker: str) -> dict | None:
+    """Fetch today's price and day change for a ticker.
+
+    Returns: {'price': float, 'change_pct': float} or None
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=3d"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-            return float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
+            result = data["chart"]["result"][0]
+            meta = result["meta"]
+            quotes = result["indicators"]["quote"][0]
+            closes = [c for c in quotes.get("close", []) if c is not None]
+
+            current = float(meta["regularMarketPrice"])
+            prev_close = float(meta.get("chartPreviousClose", closes[-2] if len(closes) >= 2 else current))
+            change_pct = (current - prev_close) / prev_close * 100 if prev_close else 0
+
+            # 30-day high
+            high_30d = max(closes) if closes else current
+            is_near_high = current >= high_30d * 0.97 if high_30d else False
+
+            return {
+                "price": current,
+                "change_pct": round(change_pct, 2),
+                "prev_close": prev_close,
+                "high_30d": high_30d,
+                "is_near_high": is_near_high,
+            }
     except Exception as e:
         print(f"  [WARN] {yahoo_ticker}: {e}")
         return None
 
 
-def fetch_highs(yahoo_ticker: str, days: int = 30) -> dict:
-    """Fetch recent price history and return highs.
-
-    Returns: {
-        'current': float,
-        'high_20d': float,    # highest close in last 20 days
-        'high_30d': float,    # highest close in last 30 days
-        'close_5d_ago': float # price 5 days ago (for trend)
-    }
-    """
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range={days}d"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            quotes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-            closes = [c for c in quotes if c is not None]
-            if not closes:
-                return None
-
-            current = closes[-1]
-            result = {
-                "current": current,
-                "high_20d": max(closes[-20:]) if len(closes) >= 20 else max(closes),
-                "high_30d": max(closes),
-                "close_5d_ago": closes[-6] if len(closes) >= 6 else closes[0],
-                "is_near_high": current >= max(closes[-10:]) * 0.97 if len(closes) >= 10 else False,
-            }
-            return result
-    except Exception as e:
-        print(f"  [WARN] History {yahoo_ticker}: {e}")
-        return None
-
-
 def fetch_eurusd() -> float:
-    """Get live EUR/USD rate."""
     url = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=1d&range=1d"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
@@ -88,57 +61,27 @@ def fetch_eurusd() -> float:
         return 1.08
 
 
-# ── Sell strategy ──────────────────────────────────────
+# ── Sell logic ───────────────────────────────────────────
 
-def suggest_limit_price(price_data: dict, avg_cost: float, currency: str, eurusd: float) -> dict | None:
-    """Calculate the best limit sell price for a profitable position.
+def suggest_limit(today: dict, avg_cost: float, currency: str) -> dict | None:
+    """Suggest a limit sell price for a profitable position."""
+    price = today["price"]
+    profit_pct = (price - avg_cost) / avg_cost * 100
 
-    Strategy (sell at high point):
-    1. If stock is near its 20-day high → set limit at 20-day high
-    2. If stock has pulled back >5% from high → set limit at high_20d * 0.98
-    3. If stock is steadily rising → set limit at current * 1.03 (3% above)
-    4. Always at least 2% above current price to leave room
-
-    Returns {'limit_price': float, 'limit_currency': str, 'reason': str} or None
-    """
-    current = price_data["current"]
-    high_20d = price_data["high_20d"]
-    high_30d = price_data["high_30d"]
-    close_5d = price_data["close_5d_ago"]
-    profit_pct = (current - avg_cost) / avg_cost * 100
-
-    # Convert avg_cost to the currency of the price data
-    # (price data is in USD for US tickers, EUR for EU tickers)
-
-    # How far from 20-day high?
-    pct_from_high = (high_20d - current) / high_20d * 100
-
-    if price_data["is_near_high"] and pct_from_high < 1:
-        # Near the high — set limit at the 30-day high (reach for it)
-        limit = round(high_30d, 2)
-        reason = f"接近20日高({high_20d:.2f})，设限价于30日高"
-    elif pct_from_high > 5:
-        # Pulled back significantly — set limit near the high
-        limit = round(high_20d * 0.98, 2)
-        reason = f"从20日高回撤{pct_from_high:.1f}%，设限价于高位的98%"
-    elif current > close_5d * 1.03:
-        # Rising trend — set limit 3% above current
-        limit = round(current * 1.03, 2)
-        reason = "上升趋势中，设限价在现价+3%"
+    if today["is_near_high"]:
+        limit = round(today["high_30d"], 2)
+        reason = f"接近30日高，设限价于{today['high_30d']:.2f}"
+    elif today["change_pct"] > 0:
+        limit = round(price * 1.03, 2)
+        reason = f"今日上涨+{today['change_pct']:.1f}%，限价+3%"
     else:
-        # Sideways — set limit at 5% above current or 20d high - 2%, whichever lower
-        limit = round(max(current * 1.02, high_20d * 0.97), 2)
-        reason = f"横盘整理，设限价在高位附近"
-
-    # Ensure limit is above current price
-    if limit <= current:
-        limit = round(current * 1.02, 2)
-        reason = "限价必须高于现价，设为+2%"
+        limit = round(price * 1.02, 2)
+        reason = f"今日下跌{today['change_pct']:.1f}%，限价+2%等反弹"
 
     return {
         "limit_price": limit,
         "currency": currency,
-        "current_price": round(current, 2),
+        "current_price": round(price, 2),
         "profit_pct": round(profit_pct, 1),
         "avg_cost": round(avg_cost, 2),
         "reason": reason,
@@ -151,14 +94,12 @@ def send_telegram(message: str):
     token = os.environ.get("TG_BOT_TOKEN", "")
     chat_id = os.environ.get("TG_CHAT_ID", "")
     if not token or not chat_id:
-        print("[SKIP] No TG secrets — printing:")
+        print("[SKIP] No TG secrets")
         print(message)
         return
-
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps({
-        "chat_id": chat_id,
-        "text": message,
+        "chat_id": chat_id, "text": message,
         "disable_web_page_preview": True,
     }).encode()
     req = urllib.request.Request(url, data=payload,
@@ -170,153 +111,134 @@ def send_telegram(message: str):
         print(f"  [ERROR] Telegram: {e}")
 
 
-def escape_md(text: str) -> str:
-    """No longer needed — using plain text."""
-    return text
-
-
 # ── Main ────────────────────────────────────────────────
 
 def main():
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
-    print(f"=== Portfolio Monitor v2 — {now.strftime('%Y-%m-%d %H:%M UTC')} ===\n")
+    print(f"=== Portfolio Monitor — {today} {now.strftime('%H:%M')} UTC ===\n")
 
-    # 1. Fetch portfolio
-    print("── Fetching portfolio from Trading212 ──")
+    # 1. Fetch
     positions = fetch_portfolio()
     if not positions:
-        print("  No positions found or API error. Exiting.")
+        print("  No positions. Exiting.")
         return
     enrich_positions(positions)
-    print(f"  Found {len(positions)} positions\n")
 
-    # 2. Fetch cash
     cash_data = fetch_cash()
     free_cash = float(cash_data.get("free", 0)) if cash_data else 0
-    total_cash = float(cash_data.get("total", 0)) if cash_data else 0
-
-    # 3. Fetch FX
     eurusd = fetch_eurusd()
-    print(f"  EUR/USD: {eurusd:.4f}\n")
+    print(f"  {len(positions)} positions, EUR/USD={eurusd:.4f}\n")
 
-    # 4. Check each position
-    sell_signals = []
-    portfolio_summary = []
+    # 2. Analyse each position
+    enriched = []
+    total_pos_value = 0
+    total_ppl = 0
 
     for pos in positions:
         cs = pos["clean_symbol"]
         yt = pos["yahoo_ticker"]
         qty = float(pos["quantity"])
         avg = float(pos["averagePrice"])
-        curr = float(pos["currentPrice"])
+        curr_t212 = float(pos["currentPrice"])
         ppl = pos["total_ppl"]
-        value = pos["current_value"]
+        val = pos["current_value"]
+        cur = pos.get("currency", "EUR")
+        display = "$" if cur == "USD" else "€"
+        total_pos_value += val
+        total_ppl += ppl
+
+        entry = {
+            "cs": cs, "yt": yt, "qty": qty, "avg": avg,
+            "price_t212": curr_t212, "ppl": ppl, "value": val,
+            "cur": cur, "display": display,
+            "today": None, "sell_signal": None,
+        }
 
         if not yt:
-            print(f"  {cs}: no Yahoo ticker mapping, skipping")
+            print(f"  {cs}: no Yahoo ticker")
+            enriched.append(entry)
             continue
 
-        # Determine display currency from auto-resolved field
-        cur = pos.get("currency", "EUR")
-        is_usd = cur == "USD"
-        display_cur = "$" if is_usd else "€"
+        today_data = fetch_today_data(yt)
+        entry["today"] = today_data
 
-        # Convert avg cost to USD if needed for comparison
-        price_data = fetch_highs(yt)
-
-        line = f"  {cs:>6} ({yt:<10})  {display_cur}{curr:<8}  avg {avg:<8}  PPL {display_cur}{ppl:<+8}"
-        portfolio_summary.append(line)
-
-        # Only care about profitable positions
-        if ppl <= 0:
-            line += f"  🔴亏损 跳过"
+        if today_data:
+            # Use Yahoo price for more accurate day-change data
+            entry["price_live"] = today_data["price"]
+            line = (f"  {cs:>6} {display}{today_data['price']:<8} "
+                    f"日涨跌{today_data['change_pct']:>+6.1f}%  "
+                    f"PPL{display}{ppl:<+8}")
             print(line)
-            continue
 
-        # Skip tiny profits (not worth selling)
-        profit_pct = (curr - avg) / avg * 100
-        if ppl < 20 and profit_pct < 3:
-            line += f"  ✅盈利({ppl:+.0f}) 但太小，跳过"
-            print(line)
-            continue
-
-        line += f"  ✅盈利"
-        print(line)
-
-        if price_data is None:
-            print(f"    ⚠️  No price history for {yt}")
-            continue
-
-        # Calculate suggested limit sell
-        # Need to handle currency: price_data.current is in the ticker's currency
-        # avg cost might be in a different currency
-        # For simplicity, compare in the ticker's native currency
-        # If avg is in EUR and ticker is USD, convert avg to USD
-        if is_usd and "EUR" in str(pos.get("ticker", "")):
-            # Cost was in EUR but we're looking at USD price
-            avg_in_cur = avg * eurusd
-            cur_label = f"${price_data['current']} (成本约${avg_in_cur:.2f})"
+            # Sell signal — only profitable positions with meaningful profit
+            if ppl > 20 or (ppl > 0 and (curr_t212 - avg) / avg * 100 > 5):
+                signal = suggest_limit(today_data, avg, display)
+                if signal:
+                    signal["name"] = f"{cs} ({yt})"
+                    signal["qty"] = qty
+                    entry["sell_signal"] = signal
+                    print(f"    → 建议限价卖: {display}{signal['limit_price']} ({signal['reason']})")
         else:
-            avg_in_cur = avg
-            cur_label = f"{display_cur}{avg:.2f}"
+            print(f"  {cs}: no live data")
 
-        if price_data["current"] > avg_in_cur:
-            suggestion = suggest_limit_price(
-                price_data, avg_in_cur,
-                "$" if is_usd else "€",
-                eurusd
-            )
-            if suggestion:
-                sell_signals.append({
-                    "name": f"{cs} ({yt})",
-                    "qty": qty,
-                    **suggestion,
-                })
-                print(f"    📈 建议限价卖: {suggestion['currency']}{suggestion['limit_price']} ({suggestion['reason']})")
-        else:
-            print(f"    ⚠️ Yahoo价({price_data['current']}) < 成本({avg_in_cur})，可能是汇率问题")
+        enriched.append(entry)
 
-    # 5. Build report
-    print(f"\n── Results ──")
-    total_value = sum(p["current_value"] for p in positions)
-    total_ppl = sum(p["total_ppl"] for p in positions)
-    print(f"  持仓市值: €{total_value:,.2f}")
-    print(f"  可用现金: €{free_cash:,.2f}")
-    print(f"  累计盈亏: €{total_ppl:+,.2f}")
+    # 3. Sort for report
+    total_val = total_pos_value + free_cash
+    # Movers: positions with today data
+    with_today = [e for e in enriched if e["today"] is not None]
+    gainers = sorted(with_today, key=lambda e: e["today"]["change_pct"], reverse=True)[:5]
+    losers = sorted(with_today, key=lambda e: e["today"]["change_pct"])[:5]
+    sell_signals = [e["sell_signal"] for e in enriched if e["sell_signal"] is not None]
 
+    # 4. Count positions by movement type
+    up = sum(1 for e in with_today if e["today"]["change_pct"] > 0)
+    dn = sum(1 for e in with_today if e["today"]["change_pct"] < 0)
+
+    # 5. Build daily report
+    lines = [f"📊 收盘日报 — {today}\n"]
+
+    # Summary
+    lines.append(f"总净值 €{total_val:,.0f}")
+    lines.append(f"持仓 €{total_pos_value:,.0f}  ·  现金 €{free_cash:,.0f}")
+    lines.append(f"累计盈亏 €{total_ppl:+,.0f}   |   今日 {up}涨 {dn}跌")
+    lines.append("")
+
+    # Top movers
+    if gainers and gainers[0]["today"]["change_pct"] > 0:
+        lines.append("📈 涨幅前3")
+        for e in gainers[:3]:
+            d = e["today"]
+            lines.append(f"  {e['cs']}  {e['display']}{d['price']:.2f}  ({d['change_pct']:+.1f}%)")
+        lines.append("")
+
+    if losers and losers[0]["today"]["change_pct"] < 0:
+        lines.append("📉 跌幅前3")
+        for e in losers[:3]:
+            d = e["today"]
+            lines.append(f"  {e['cs']}  {e['display']}{d['price']:.2f}  ({d['change_pct']:+.1f}%)")
+        lines.append("")
+
+    # Sell signals
     if sell_signals:
-        # Build Telegram message
-        lines = [f"Portfolio Monitor — {today}\n"]
-
-        # Summary header
-        lines.append(
-            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}"
-        )
-        lines.append("")
-        lines.append(f"🔔 {len(sell_signals)} 个盈利标的有卖出建议")
+        lines.append(f"💡 卖出建议 ({len(sell_signals)}个)")
+        for s in sell_signals[:5]:
+            pct_str = f"{s['profit_pct']:+.1f}%"
+            lines.append(f"  {s['name']}  盈利{pct_str}")
+            lines.append(f"    限价: {s['currency']}{s['limit_price']}  |  现价 {s['currency']}{s['current_price']}")
         lines.append("")
 
-        for s in sell_signals:
-            lines.append(
-                f"{s['name']}"
-            )
-            lines.append(f"  盈利 {s['profit_pct']}%  |  持仓 {s['qty']}股")
-            lines.append(f"  限价卖: {s['currency']}{s['limit_price']}")
-            lines.append(f"  现价 {s['currency']}{s['current_price']}  |  成本 {s['currency']}{s['avg_cost']}")
-            lines.append(f"  策略: {s['reason']}")
-            lines.append("")
+    # Positions near 30-day high (potential sell candidates for future)
+    near_high = [e for e in with_today if e["today"] and e["today"]["is_near_high"] and e["ppl"] > 0]
+    if near_high:
+        lines.append(f"🔔 接近高位（关注）")
+        for e in near_high[:3]:
+            d = e["today"]
+            lines.append(f"  {e['cs']}  {e['display']}{d['price']:.2f} (30日高 {e['display']}{d['high_30d']:.2f})")
+        lines.append("")
 
-        lines.append("建议在Trading212设置Limit Order")
-
-        msg = "\n".join(lines)
-    else:
-        msg_lines = [f"Portfolio Monitor — {today}\n"]
-        msg_lines.append(
-            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}"
-        )
-        msg_lines.append("\n✅ 当前没有盈利标的需要卖出建议。")
-        msg = "\n".join(msg_lines)
+    msg = "\n".join(lines)
 
     print(f"\n── Sending ──")
     send_telegram(msg)

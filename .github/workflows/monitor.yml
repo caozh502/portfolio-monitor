@@ -2,7 +2,7 @@ name: Portfolio Monitor
 
 "on":
   schedule:
-    - cron: '0 9 * * 1-5'
+    # Daily at 16:00 UTC (18:00 CEST / 12:00 ET) — after European close
     - cron: '0 16 * * 1-5'
   workflow_dispatch:
 

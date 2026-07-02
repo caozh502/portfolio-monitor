@@ -13,7 +13,15 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 ENV_KEY = os.environ.get("TRADING212_API_KEY") or ""
 ENV_SECRET = os.environ.get("TRADING212_API_SECRET") or ""
 
-# ── Automatic ticker resolution ──────────────────────────
+# ── Known overrides for problematic tickers ──────────────
+# Auto-resolver finds the European exchange listing, but some
+# cross-listed stocks have odd price ratios on European exchanges.
+# These override to the canonical US ticker for accurate data.
+_TICKER_OVERRIDE = {
+    "6RJ": "RKLB",    # Rocket Lab — European price is fractional
+    "9MW": "MRVL",    # Marvell — same issue
+    "TSFA": "TSM",    # TSMC — US ADR is the liquid one
+}
 # Cache: resolved Yahoo ticker once found (in-memory, per-run)
 _YAHOO_CACHE: dict[str, str | None] = {}
 
@@ -56,6 +64,13 @@ def resolve_yahoo_ticker(raw_ticker: str) -> tuple[str | None, str]:
     - Returns (None, '?') if no resolution found
     """
     clean_sym = clean_ticker(raw_ticker)
+
+    # Check override first
+    if clean_sym in _TICKER_OVERRIDE:
+        override = _TICKER_OVERRIDE[clean_sym]
+        result = (override, "USD")
+        return result
+
     cache_key = f"{raw_ticker}|{clean_sym}"
 
     if cache_key in _YAHOO_CACHE:
