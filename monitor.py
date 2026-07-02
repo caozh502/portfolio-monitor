@@ -160,7 +160,6 @@ def send_telegram(message: str):
     payload = json.dumps({
         "chat_id": chat_id,
         "text": message,
-        "parse_mode": "MarkdownV2",
         "disable_web_page_preview": True,
     }).encode()
     req = urllib.request.Request(url, data=payload,
@@ -173,8 +172,7 @@ def send_telegram(message: str):
 
 
 def escape_md(text: str) -> str:
-    for ch in r"_*[]()~`>#+-=|{}.!":
-        text = text.replace(ch, f"\\{ch}")
+    """No longer needed — using plain text."""
     return text
 
 
@@ -289,33 +287,34 @@ def main():
 
     if sell_signals:
         # Build Telegram message
-        lines = [f"📊 *Portfolio Monitor — {today}*\n"]
+        lines = [f"Portfolio Monitor — {today}\n"]
 
         # Summary header
-        lines.append(escape_md(
+        lines.append(
             f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}"
-        ))
+        )
         lines.append("")
-        lines.append(f"*🔔 {len(sell_signals)} 个盈利标的有卖出建议*")
+        lines.append(f"🔔 {len(sell_signals)} 个盈利标的有卖出建议")
         lines.append("")
 
         for s in sell_signals:
             lines.append(
-                f"*{s['name']}*\n"
-                f"💰 盈利 {escape_md(str(s['profit_pct']))}%  | 持仓 {s['qty']}股\n"
-                f"📈 限价卖: *{s['currency']}{escape_md(str(s['limit_price']))}*\n"
-                f"  现价 {s['currency']}{s['current_price']}  | 成本 {s['currency']}{s['avg_cost']}\n"
-                f"  _{escape_md(s['reason'])}_\n"
+                f"{s['name']}"
             )
+            lines.append(f"  盈利 {s['profit_pct']}%  |  持仓 {s['qty']}股")
+            lines.append(f"  限价卖: {s['currency']}{s['limit_price']}")
+            lines.append(f"  现价 {s['currency']}{s['current_price']}  |  成本 {s['currency']}{s['avg_cost']}")
+            lines.append(f"  策略: {s['reason']}")
+            lines.append("")
 
-        lines.append("_建议在Trading212设置Limit Order_\n")
+        lines.append("建议在Trading212设置Limit Order")
 
         msg = "\n".join(lines)
     else:
-        msg_lines = [f"📊 *Portfolio Monitor — {today}*\n"]
-        msg_lines.append(escape_md(
+        msg_lines = [f"Portfolio Monitor — {today}\n"]
+        msg_lines.append(
             f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}"
-        ))
+        )
         msg_lines.append("\n✅ 当前没有盈利标的需要卖出建议。")
         msg = "\n".join(msg_lines)
 
