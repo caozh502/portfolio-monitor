@@ -18,9 +18,9 @@ ENV_SECRET = os.environ.get("TRADING212_API_SECRET") or ""
 # cross-listed stocks have odd price ratios on European exchanges.
 # These override to the canonical US ticker for accurate data.
 _TICKER_OVERRIDE = {
-    "6RJ": "RKLB",    # Rocket Lab — European price is fractional
-    "9MW": "MRVL",    # Marvell — same issue
-    "TSFA": "TSM",    # TSMC — US ADR is the liquid one
+    "6RJ": "RKLB",    # Rocket Lab — correct exchange symbol is 6RJ0
+    "9MW": "MRVL",    # Marvell
+    "TSFA": "TSM",    # TSMC ADR
 }
 # Cache: resolved Yahoo ticker once found (in-memory, per-run)
 _YAHOO_CACHE: dict[str, str | None] = {}
