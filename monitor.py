@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 
 from trading212 import (
     fetch_portfolio, fetch_cash, enrich_positions,
-    is_us_ticker, get_yahoo_ticker,
 )
 
 
@@ -218,8 +217,9 @@ def main():
             print(f"  {cs}: no Yahoo ticker mapping, skipping")
             continue
 
-        # Determine display currency
-        is_usd = is_us_ticker(cs)
+        # Determine display currency from auto-resolved field
+        cur = pos.get("currency", "EUR")
+        is_usd = cur == "USD"
         display_cur = "$" if is_usd else "€"
 
         # Convert avg cost to USD if needed for comparison
