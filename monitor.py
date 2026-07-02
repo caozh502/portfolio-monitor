@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Portfolio Monitor — weekly check of sell targets + market alerts.
-Sends Telegram notification when conditions are met.
+Portfolio Monitor v2 — auto-fetch from Trading212, suggest limit sells for profitable positions.
+Runs via GitHub Actions on schedule.
 
-Usage:
-    export TG_BOT_TOKEN=xxx TG_CHAT_ID=xxx
-    python monitor.py
+Strategy:
+  - Fetch current portfolio from Trading212 live API
+  - For each position in profit: calculate a limit sell price (near recent high)
+  - Notify via Telegram with actionable suggestions
+  - Only sell profitable positions (user's rule)
 """
-
 import json
 import os
 import sys
@@ -15,64 +16,134 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
-from config import TARGETS, DCA_CONFIG
+from trading212 import (
+    fetch_portfolio, fetch_cash, enrich_positions,
+    is_us_ticker, get_yahoo_ticker,
+)
 
-# ── FX rate ──────────────────────────────────────────────
 
-def fetch_eurusd() -> float:
-    """Fetch live EUR/USD exchange rate."""
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=1d&range=1d"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-            price = data["chart"]["result"][0]["meta"]["regularMarketPrice"]
-            return float(price)
-    except Exception:
-        return 1.08  # fallback
+# ── Config overrides via env vars ─────────────────────────
+# On GitHub Actions, set these as secrets
+TRADING212_API_KEY = os.environ.get("TRADING212_API_KEY") or ""
+TRADING212_API_SECRET = os.environ.get("TRADING212_API_SECRET") or ""
 
 
 # ── Price helpers ────────────────────────────────────────
 
 def fetch_price(yahoo_ticker: str) -> float | None:
-    """Fetch current price from Yahoo Finance chart API."""
+    """Fetch current price from Yahoo Finance."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=5d"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-            result = data["chart"]["result"][0]
-            return float(result["meta"]["regularMarketPrice"])
+            return float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
     except Exception as e:
-        print(f"  [WARN] Failed to fetch {yahoo_ticker}: {e}")
+        print(f"  [WARN] {yahoo_ticker}: {e}")
         return None
 
 
-def fetch_historical(ticker: str, days: int = 250) -> list[float]:
-    """Fetch historical close prices."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range={days}d"
+def fetch_highs(yahoo_ticker: str, days: int = 30) -> dict:
+    """Fetch recent price history and return highs.
+
+    Returns: {
+        'current': float,
+        'high_20d': float,    # highest close in last 20 days
+        'high_30d': float,    # highest close in last 30 days
+        'close_5d_ago': float # price 5 days ago (for trend)
+    }
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range={days}d"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
             quotes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
-            return [c for c in quotes if c is not None]
+            closes = [c for c in quotes if c is not None]
+            if not closes:
+                return None
+
+            current = closes[-1]
+            result = {
+                "current": current,
+                "high_20d": max(closes[-20:]) if len(closes) >= 20 else max(closes),
+                "high_30d": max(closes),
+                "close_5d_ago": closes[-6] if len(closes) >= 6 else closes[0],
+                "is_near_high": current >= max(closes[-10:]) * 0.97 if len(closes) >= 10 else False,
+            }
+            return result
     except Exception as e:
-        print(f"  [WARN] Failed to fetch history for {ticker}: {e}")
-        return []
+        print(f"  [WARN] History {yahoo_ticker}: {e}")
+        return None
 
 
-# ── Currency conversion ──────────────────────────────────
+def fetch_eurusd() -> float:
+    """Get live EUR/USD rate."""
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/EURUSD=X?interval=1d&range=1d"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
+    except Exception:
+        return 1.08
 
-def convert(amount: float, from_cur: str, to_cur: str, eurusd: float) -> float:
-    """Convert amount from from_cur to to_cur."""
-    if from_cur == to_cur:
-        return amount
-    if from_cur == "EUR" and to_cur == "USD":
-        return amount * eurusd
-    if from_cur == "USD" and to_cur == "EUR":
-        return amount / eurusd
-    return amount
+
+# ── Sell strategy ──────────────────────────────────────
+
+def suggest_limit_price(price_data: dict, avg_cost: float, currency: str, eurusd: float) -> dict | None:
+    """Calculate the best limit sell price for a profitable position.
+
+    Strategy (sell at high point):
+    1. If stock is near its 20-day high → set limit at 20-day high
+    2. If stock has pulled back >5% from high → set limit at high_20d * 0.98
+    3. If stock is steadily rising → set limit at current * 1.03 (3% above)
+    4. Always at least 2% above current price to leave room
+
+    Returns {'limit_price': float, 'limit_currency': str, 'reason': str} or None
+    """
+    current = price_data["current"]
+    high_20d = price_data["high_20d"]
+    high_30d = price_data["high_30d"]
+    close_5d = price_data["close_5d_ago"]
+    profit_pct = (current - avg_cost) / avg_cost * 100
+
+    # Convert avg_cost to the currency of the price data
+    # (price data is in USD for US tickers, EUR for EU tickers)
+
+    # How far from 20-day high?
+    pct_from_high = (high_20d - current) / high_20d * 100
+
+    if price_data["is_near_high"] and pct_from_high < 1:
+        # Near the high — set limit at the 30-day high (reach for it)
+        limit = round(high_30d, 2)
+        reason = f"接近20日高({high_20d:.2f})，设限价于30日高"
+    elif pct_from_high > 5:
+        # Pulled back significantly — set limit near the high
+        limit = round(high_20d * 0.98, 2)
+        reason = f"从20日高回撤{pct_from_high:.1f}%，设限价于高位的98%"
+    elif current > close_5d * 1.03:
+        # Rising trend — set limit 3% above current
+        limit = round(current * 1.03, 2)
+        reason = "上升趋势中，设限价在现价+3%"
+    else:
+        # Sideways — set limit at 5% above current or 20d high - 2%, whichever lower
+        limit = round(max(current * 1.02, high_20d * 0.97), 2)
+        reason = f"横盘整理，设限价在高位附近"
+
+    # Ensure limit is above current price
+    if limit <= current:
+        limit = round(current * 1.02, 2)
+        reason = "限价必须高于现价，设为+2%"
+
+    return {
+        "limit_price": limit,
+        "currency": currency,
+        "current_price": round(current, 2),
+        "profit_pct": round(profit_pct, 1),
+        "avg_cost": round(avg_cost, 2),
+        "reason": reason,
+    }
 
 
 # ── Telegram ─────────────────────────────────────────────
@@ -81,7 +152,7 @@ def send_telegram(message: str):
     token = os.environ.get("TG_BOT_TOKEN", "")
     chat_id = os.environ.get("TG_CHAT_ID", "")
     if not token or not chat_id:
-        print("[SKIP] TG_BOT_TOKEN or TG_CHAT_ID not set — printing instead:")
+        print("[SKIP] No TG secrets — printing:")
         print(message)
         return
 
@@ -98,136 +169,155 @@ def send_telegram(message: str):
         urllib.request.urlopen(req, timeout=15)
         print("  [OK] Telegram sent")
     except Exception as e:
-        print(f"  [ERROR] Telegram failed: {e}")
+        print(f"  [ERROR] Telegram: {e}")
 
 
 def escape_md(text: str) -> str:
-    """Escape Telegram MarkdownV2 special chars."""
     for ch in r"_*[]()~`>#+-=|{}.!":
         text = text.replace(ch, f"\\{ch}")
     return text
-
-
-# ── Target checks ────────────────────────────────────────
-
-def check_targets(eurusd: float) -> list[str]:
-    alerts = []
-
-    for item in TARGETS:
-        name = item["name"]
-        ticker = item["ticker"]
-        avg = item["avg_price"]
-        cost_cur = item["cost_currency"]
-        ticker_cur = item["ticker_currency"]
-
-        price = fetch_price(ticker)
-        if price is None:
-            continue
-
-        # Convert target prices from cost_currency to ticker_currency
-        # so we can compare directly with Yahoo price
-        def to_ticker_cur(price_val, cur):
-            return convert(price_val, cur, ticker_cur, eurusd)
-
-        # Convert the user's cost basis to ticker_currency
-        avg_in_ticker_cur = convert(avg, cost_cur, ticker_cur, eurusd)
-        change_pct = (price - avg_in_ticker_cur) / avg_in_ticker_cur * 100
-
-        print(f"  {ticker}: {ticker_cur} {price:.2f} (cost {ticker_cur} {avg_in_ticker_cur:.2f}, {change_pct:+.1f}%)")
-
-        # Format display price (show in cost_currency for user)
-        price_in_cost_cur = convert(price, ticker_cur, cost_cur, eurusd)
-        display_cur = "€" if cost_cur == "EUR" else "$"
-
-        # Check stop loss
-        sl = item.get("stop_loss")
-        if sl:
-            sl_in_ticker = to_ticker_cur(sl["price"], sl.get("currency", cost_cur))
-            if price <= sl_in_ticker:
-                alerts.append(
-                    f"🔴 *止损触发: {name}*\n"
-                    f"现价 {display_cur}{price_in_cost_cur:.2f} ≤ 止损 {display_cur}{sl['price']:.2f}\n"
-                    f"成本 {display_cur}{avg:.2f} ({change_pct:+.1f}%)\n"
-                    f"操作: {sl['action']}"
-                )
-                continue
-
-        # Check targets
-        for t in item["targets"]:
-            t_in_ticker = to_ticker_cur(t["price"], t.get("currency", cost_cur))
-            if price >= t_in_ticker:
-                display_target = f"{'€' if t.get('currency', cost_cur) == 'EUR' else '$'}{t['price']:.2f}"
-                alerts.append(
-                    f"🎯 *目标达成: {name}*\n"
-                    f"现价 {display_cur}{price_in_cost_cur:.2f} ≥ {display_target}\n"
-                    f"成本 {display_cur}{avg:.2f} ({change_pct:+.1f}%)\n"
-                    f"操作: {t['action']}"
-                )
-                break
-
-    return alerts
-
-
-# ── DCA alerts ──────────────────────────────────────────
-
-def check_dca() -> list[str]:
-    alerts = []
-
-    for label, ticker in [("VUAA", "VUAA.DE"), ("SXRV", "SXRV.DE")]:
-        prices = fetch_historical(ticker, days=7)
-        if len(prices) >= 5:
-            week_change = (prices[-1] - prices[0]) / prices[0] * 100
-            if week_change <= DCA_CONFIG["weekly_drop_threshold"]:
-                alerts.append(
-                    f"⚠️ *{label} 单周下跌 {week_change:.1f}%*\n"
-                    f"阈值 {DCA_CONFIG['weekly_drop_threshold']}%\n"
-                    f"建议: 暂停定投，等企稳"
-                )
-
-    prices = fetch_historical("VUAA.DE", days=250)
-    if len(prices) >= DCA_CONFIG["ma_period"]:
-        ma200 = sum(prices[-DCA_CONFIG["ma_period"]:]) / DCA_CONFIG["ma_period"]
-        current = prices[-1]
-        if current < ma200:
-            pct = (current - ma200) / ma200 * 100
-            alerts.append(
-                f"📉 *VUAA 跌破200日线*\n"
-                f"现价 {current:.2f} < MA200 {ma200:.2f} ({pct:+.1f}%)\n"
-                f"建议: 暂停定投，等站回均线"
-            )
-
-    return alerts
 
 
 # ── Main ────────────────────────────────────────────────
 
 def main():
     now = datetime.now(timezone.utc)
-    print(f"=== Portfolio Monitor — {now.strftime('%Y-%m-%d %H:%M UTC')} ===\n")
+    print(f"=== Portfolio Monitor v2 — {now.strftime('%Y-%m-%d %H:%M UTC')} ===\n")
 
-    print("── FX rate ──")
+    # 1. Fetch portfolio
+    print("── Fetching portfolio from Trading212 ──")
+    positions = fetch_portfolio()
+    if not positions:
+        print("  No positions found or API error. Exiting.")
+        return
+    enrich_positions(positions)
+    print(f"  Found {len(positions)} positions\n")
+
+    # 2. Fetch cash
+    cash_data = fetch_cash()
+    free_cash = float(cash_data.get("free", 0)) if cash_data else 0
+    total_cash = float(cash_data.get("total", 0)) if cash_data else 0
+
+    # 3. Fetch FX
     eurusd = fetch_eurusd()
     print(f"  EUR/USD: {eurusd:.4f}\n")
 
-    all_alerts = []
+    # 4. Check each position
+    sell_signals = []
+    portfolio_summary = []
 
-    print("── Sell targets ──")
-    all_alerts.extend(check_targets(eurusd))
+    for pos in positions:
+        cs = pos["clean_symbol"]
+        yt = pos["yahoo_ticker"]
+        qty = float(pos["quantity"])
+        avg = float(pos["averagePrice"])
+        curr = float(pos["currentPrice"])
+        ppl = pos["total_ppl"]
+        value = pos["current_value"]
 
-    print("\n── DCA conditions ──")
-    all_alerts.extend(check_dca())
+        if not yt:
+            print(f"  {cs}: no Yahoo ticker mapping, skipping")
+            continue
 
-    if not all_alerts:
-        print("\n✅ No alerts. All quiet.")
-        return
+        # Determine display currency
+        is_usd = is_us_ticker(cs)
+        display_cur = "$" if is_usd else "€"
 
-    today = now.strftime("%Y-%m-%d")
-    msg_lines = [f"📊 *Portfolio Monitor — {today}*\n"]
-    for alert in all_alerts:
-        msg_lines.append(escape_md(alert) + "\n")
+        # Convert avg cost to USD if needed for comparison
+        price_data = fetch_highs(yt)
 
-    msg = "\n".join(msg_lines)
-    print("\n── Sending ──")
+        line = f"  {cs:>6} ({yt:<10})  {display_cur}{curr:<8}  avg {avg:<8}  PPL {display_cur}{ppl:<+8}"
+        portfolio_summary.append(line)
+
+        # Only care about profitable positions
+        if ppl <= 0:
+            line += f"  🔴亏损 跳过"
+            print(line)
+            continue
+
+        # Skip tiny profits (not worth selling)
+        profit_pct = (curr - avg) / avg * 100
+        if ppl < 20 and profit_pct < 3:
+            line += f"  ✅盈利({ppl:+.0f}) 但太小，跳过"
+            print(line)
+            continue
+
+        line += f"  ✅盈利"
+        print(line)
+
+        if price_data is None:
+            print(f"    ⚠️  No price history for {yt}")
+            continue
+
+        # Calculate suggested limit sell
+        # Need to handle currency: price_data.current is in the ticker's currency
+        # avg cost might be in a different currency
+        # For simplicity, compare in the ticker's native currency
+        # If avg is in EUR and ticker is USD, convert avg to USD
+        if is_usd and "EUR" in str(pos.get("ticker", "")):
+            # Cost was in EUR but we're looking at USD price
+            avg_in_cur = avg * eurusd
+            cur_label = f"${price_data['current']} (成本约${avg_in_cur:.2f})"
+        else:
+            avg_in_cur = avg
+            cur_label = f"{display_cur}{avg:.2f}"
+
+        if price_data["current"] > avg_in_cur:
+            suggestion = suggest_limit_price(
+                price_data, avg_in_cur,
+                "$" if is_usd else "€",
+                eurusd
+            )
+            if suggestion:
+                sell_signals.append({
+                    "name": f"{cs} ({yt})",
+                    "qty": qty,
+                    **suggestion,
+                })
+                print(f"    📈 建议限价卖: {suggestion['currency']}{suggestion['limit_price']} ({suggestion['reason']})")
+        else:
+            print(f"    ⚠️ Yahoo价({price_data['current']}) < 成本({avg_in_cur})，可能是汇率问题")
+
+    # 5. Build report
+    print(f"\n── Results ──")
+    total_value = sum(p["current_value"] for p in positions)
+    total_ppl = sum(p["total_ppl"] for p in positions)
+    print(f"  持仓市值: €{total_value:,.2f}")
+    print(f"  可用现金: €{free_cash:,.2f}")
+    print(f"  累计盈亏: €{total_ppl:+,.2f}")
+
+    if sell_signals:
+        # Build Telegram message
+        today = now.strftime("%Y-%m-%d")
+        lines = [f"📊 *Portfolio Monitor — {today}*\n"]
+
+        # Summary header
+        lines.append(escape_md(
+            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}\n"
+        ))
+
+        lines.append(f"*🔔 {len(sell_signals)} 个盈利标的有卖出建议*\n")
+
+        for s in sell_signals:
+            lines.append(
+                f"*{s['name']}*\n"
+                f"💰 盈利 {escape_md(str(s['profit_pct']))}%  | 持仓 {s['qty']}股\n"
+                f"📈 限价卖: *{s['currency']}{escape_md(str(s['limit_price']))}*\n"
+                f"  现价 {s['currency']}{s['current_price']}  | 成本 {s['currency']}{s['avg_cost']}\n"
+                f"  _{escape_md(s['reason'])}_\n"
+            )
+
+        lines.append("_建议在Trading212设置Limit Order_\n")
+
+        msg = "\n".join(lines)
+    else:
+        msg = (
+            f"📊 *Portfolio Monitor — {today}*\n\n"
+            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}\n\n"
+            f"✅ 当前没有盈利标的需要卖出建议。"
+        )
+
+    print(f"\n── Sending ──")
     send_telegram(msg)
     print("Done.")
 
