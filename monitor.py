@@ -293,10 +293,11 @@ def main():
 
         # Summary header
         lines.append(escape_md(
-            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}\n"
+            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}"
         ))
-
-        lines.append(f"*🔔 {len(sell_signals)} 个盈利标的有卖出建议*\n")
+        lines.append("")
+        lines.append(f"*🔔 {len(sell_signals)} 个盈利标的有卖出建议*")
+        lines.append("")
 
         for s in sell_signals:
             lines.append(
@@ -311,11 +312,12 @@ def main():
 
         msg = "\n".join(lines)
     else:
-        msg = (
-            f"📊 *Portfolio Monitor — {today}*\n\n"
-            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}\n\n"
-            f"✅ 当前没有盈利标的需要卖出建议。"
-        )
+        msg_lines = [f"📊 *Portfolio Monitor — {today}*\n"]
+        msg_lines.append(escape_md(
+            f"持仓 €{total_value:,.0f} | 现金 €{free_cash:,.0f} | 盈亏 €{total_ppl:+,.0f}"
+        ))
+        msg_lines.append("\n✅ 当前没有盈利标的需要卖出建议。")
+        msg = "\n".join(msg_lines)
 
     print(f"\n── Sending ──")
     send_telegram(msg)
