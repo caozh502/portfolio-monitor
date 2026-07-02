@@ -1,0 +1,29 @@
+name: Portfolio Monitor
+
+on:
+  schedule:
+    # Mon-Fri: check at 09:00 UTC (11:00 CEST) — mid-morning in Europe
+    - cron: '0 9 * * 1-5'
+    # Also check at 16:00 UTC (18:00 CEST) — near market close
+    - cron: '0 16 * * 1-5'
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run monitor
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: python monitor.py
