@@ -182,6 +182,7 @@ def escape_md(text: str) -> str:
 
 def main():
     now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
     print(f"=== Portfolio Monitor v2 — {now.strftime('%Y-%m-%d %H:%M UTC')} ===\n")
 
     # 1. Fetch portfolio
@@ -288,7 +289,6 @@ def main():
 
     if sell_signals:
         # Build Telegram message
-        today = now.strftime("%Y-%m-%d")
         lines = [f"📊 *Portfolio Monitor — {today}*\n"]
 
         # Summary header
