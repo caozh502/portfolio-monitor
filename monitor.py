@@ -386,10 +386,14 @@ def main():
 
         if today_data:
             entry["price_live"] = today_data["price"]
+            pct_chg = (curr_t212 - avg) / avg * 100 if avg else 0
             line = (f"  {cs:>6} {display}{today_data['price']:<8} "
                     f"日涨跌{today_data['change_pct']:>+6.1f}%  "
                     f"PPL{display}{ppl:<+8}")
             print(line)
+            # Full data for portfolio analysis
+            print(f"    qty={qty:.0f} avg={display}{avg:.2f} val={display}{val:.0f} "
+                  f"pct_chg_from_avg={pct_chg:+.1f}% cur={cur}")
 
             # Weekly data (only needed for weekly/quarterly reports)
             if rtype in ("weekly", "quarterly"):
