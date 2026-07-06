@@ -385,6 +385,10 @@ def main():
         today_data = fetch_today_data(yt)
         entry["today"] = today_data
 
+        if not today_data:
+            raw_ticker = pos.get("ticker", "?")
+            print(f"  {cs}: no live data (yt={yt}, raw={raw_ticker})")
+
         if today_data:
             entry["price_live"] = today_data["price"]
             pct_chg = (curr_t212 - avg) / avg * 100 if avg else 0
