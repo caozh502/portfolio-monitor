@@ -377,7 +377,8 @@ def main():
         }
 
         if not yt:
-            print(f"  {cs}: no Yahoo ticker")
+            raw_ticker = pos.get("ticker", "?")
+            print(f"  {cs}: no Yahoo ticker (raw={raw_ticker})")
             enriched.append(entry)
             continue
 
