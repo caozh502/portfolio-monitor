@@ -1,4 +1,4 @@
-name: Portfolio Monitor
+name: Daily Portfolio Review
 
 "on":
   schedule:
