@@ -76,6 +76,7 @@ def send_telegram(message: str):
     for i, part in enumerate(parts):
         payload = json.dumps({
             "chat_id": chat_id, "text": part,
+            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }).encode()
         req = urllib.request.Request(
