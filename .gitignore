@@ -3,3 +3,5 @@ __pycache__/
 *.pyo
 .env
 .DS_Store
+.hermes-tmp.*
+.github/workflows/.hermes-tmp.*

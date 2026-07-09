@@ -1,0 +1,46 @@
+name: Weekly Portfolio Review
+
+on:
+  schedule:
+    # Saturday 12:00 UTC (14:00 CEST) — after the full trading week
+    - cron: '0 12 * * 6'
+  workflow_dispatch:  # manual trigger
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history for git commit + push
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run weekly review
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TRADING212_API_KEY: ${{ secrets.TRADING212_API_KEY }}
+          TRADING212_API_SECRET: ${{ secrets.TRADING212_API_SECRET }}
+        run: python scripts/weekly_review.py
+
+      - name: Commit snapshots
+        run: |
+          git config user.name "Weekly Review Bot"
+          git config user.email "bot@portfolio-monitor"
+          git add snapshots/
+          # Only commit if there are changes
+          if git diff --cached --quiet; then
+            echo "No new snapshots to commit"
+          else
+            git commit -m "weekly-snapshot: $(date +%Y-W%V)"
+            git push
+            echo "Snapshots committed and pushed"
+          fi
