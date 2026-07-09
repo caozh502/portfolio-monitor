@@ -34,6 +34,14 @@ TICKER_NAMES = {
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
+# Sector ETFs for weekly fund flow reference
+SECTORS = {
+    "XLF": "金融", "XLK": "科技", "XLV": "医疗",
+    "XLE": "能源", "XLI": "工业", "XLP": "必需消费",
+    "XLU": "公用事业", "XLB": "材料", "XLY": "可选消费",
+    "XLC": "通信", "IBB": "生物科技",
+}
+
 def week_label(dt: datetime) -> str:
     iso = dt.isocalendar()
     return f"{iso[0]}-W{iso[1]:02d}"
@@ -48,6 +56,29 @@ def fetch_eurusd() -> float:
             return float(data["chart"]["result"][0]["meta"]["regularMarketPrice"])
     except Exception:
         return EURUSD_DEFAULT
+
+
+def fetch_sector_weekly() -> list[dict]:
+    """Fetch weekly performance for all sector ETFs. Returns sorted list."""
+    results = []
+    for ticker, name in SECTORS.items():
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=1mo"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                data = json.loads(resp.read())
+                quotes = data["chart"]["result"][0]["indicators"]["quote"][0]
+                closes = [c for c in quotes.get("close", []) if c is not None]
+                if len(closes) >= 6:
+                    wk_chg = (closes[-1] - closes[-6]) / closes[-6] * 100
+                    results.append({
+                        "ticker": ticker, "name": name,
+                        "weekly_chg": round(wk_chg, 1),
+                    })
+        except Exception as e:
+            print(f"  [WARN] sector {ticker}: {e}")
+    results.sort(key=lambda x: -x["weekly_chg"])
+    return results
 
 
 def send_telegram(message: str):
@@ -341,7 +372,8 @@ def evaluate_trading(diff: dict, current: dict) -> tuple[str, list[str], list[st
 # ── Report Builder ─────────────────────────────────────────────────
 
 def build_report(current: dict, previous: dict | None, diff_data: dict | None,
-                 grade: str, good: list[str], bad: list[str]) -> str:
+                 grade: str, good: list[str], bad: list[str],
+                 sector_flow: list[dict] | None = None) -> str:
     """Build the full Telegram report text."""
     lines = []
     week = current["week"]
@@ -422,6 +454,21 @@ def build_report(current: dict, previous: dict | None, diff_data: dict | None,
     if current["position_count"] > 5:
         lines.append(f"  ... 还有{current['position_count'] - 5}个标的")
     lines.append("")
+
+    # ── Sector Flow ──
+    if sector_flow:
+        lines.append("<b>🏭 板块资金流向（本周）</b>")
+        top3 = sector_flow[:3]
+        bot3 = sector_flow[-3:]
+        lines.append("  🔥 流入TOP3:")
+        for s in top3:
+            arrow = "▲" if s["weekly_chg"] > 0 else "▼"
+            lines.append(f"    {s['ticker']} {s['name']}  {arrow}{s['weekly_chg']:+.1f}%")
+        lines.append("  ❄️ 流出TOP3:")
+        for s in reversed(bot3):
+            arrow = "▲" if s["weekly_chg"] > 0 else "▼"
+            lines.append(f"    {s['ticker']} {s['name']}  {arrow}{s['weekly_chg']:+.1f}%")
+        lines.append("")
 
     # ── Evaluation ──
     lines.append(f"<b>🏆 本周评级: {grade}</b>")
@@ -525,8 +572,16 @@ def main():
     # 6. Evaluate
     grade, good, bad = evaluate_trading(diff_data or {}, snapshot)
 
-    # 7. Build report
-    report = build_report(snapshot, previous, diff_data, grade, good, bad)
+    # 7. Fetch sector fund flow data
+    print("\nFetching sector fund flow...")
+    sector_flow = fetch_sector_weekly()
+    print(f"  {len(sector_flow)} sectors loaded")
+    if sector_flow:
+        print(f"  Top inflow: {sector_flow[0]['name']} ({sector_flow[0]['weekly_chg']:+.1f}%)")
+        print(f"  Top outflow: {sector_flow[-1]['name']} ({sector_flow[-1]['weekly_chg']:+.1f}%)")
+
+    # 8. Build report
+    report = build_report(snapshot, previous, diff_data, grade, good, bad, sector_flow)
     print(f"\n── Report ({len(report)} chars) ──\n")
     print(report)
 
