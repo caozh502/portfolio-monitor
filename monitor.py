@@ -156,6 +156,7 @@ def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = json.dumps({
         "chat_id": chat_id, "text": message,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }).encode()
     req = urllib.request.Request(url, data=payload,
