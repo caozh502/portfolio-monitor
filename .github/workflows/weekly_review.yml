@@ -9,6 +9,8 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to push snapshot files
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,9 +34,12 @@ jobs:
         run: python scripts/weekly_review.py
 
       - name: Commit snapshots
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           git config user.name "Weekly Review Bot"
           git config user.email "bot@portfolio-monitor"
+          git remote set-url origin https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}
           git add snapshots/
           # Only commit if there are changes
           if git diff --cached --quiet; then
