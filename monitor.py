@@ -46,8 +46,12 @@ def quarter_label(m: int) -> str:
 # ── Price helpers ────────────────────────────────────────
 
 def fetch_today_data(yahoo_ticker: str) -> dict | None:
-    """Fetch today's price and day change."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=3d"
+    """Fetch today's price and day change.
+    Uses range=2mo to get enough data for prev close + 30d high.
+    Computes daily change from actual closes array (not chartPreviousClose meta),
+    which is more reliable for European cross-listed stocks.
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=2mo"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -55,12 +59,22 @@ def fetch_today_data(yahoo_ticker: str) -> dict | None:
             result = data["chart"]["result"][0]
             meta = result["meta"]
             quotes = result["indicators"]["quote"][0]
-            closes = [c for c in quotes.get("close", []) if c is not None]
-            current = float(meta["regularMarketPrice"])
-            prev_close = float(meta.get("chartPreviousClose",
-                                        closes[-2] if len(closes) >= 2 else current))
+            timestamps = result.get("timestamp", [])
+            closes_all = quotes.get("close", [])
+            # Build (close, ts) pairs and drop None
+            pairs = [(c, ts) for c, ts in zip(closes_all, timestamps)
+                     if c is not None]
+            if len(pairs) < 2:
+                return None
+
+            current = float(pairs[-1][0])
+            prev_close = float(pairs[-2][0])
             change_pct = (current - prev_close) / prev_close * 100 if prev_close else 0
-            high_30d = max(closes) if closes else current
+
+            # True 30-day high from the data we have (~40 trading days)
+            closes_only = [c for c, _ in pairs]
+            high_30d = max(closes_only[-30:]) if len(closes_only) >= 30 else max(closes_only)
+
             return {
                 "price": current,
                 "change_pct": round(change_pct, 2),
@@ -74,17 +88,23 @@ def fetch_today_data(yahoo_ticker: str) -> dict | None:
 
 
 def fetch_weekly_data(yahoo_ticker: str) -> dict | None:
-    """Fetch price change over the last 5 trading days."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=7d"
+    """Fetch price change over the last 5 trading days.
+    Computes from actual closes in the data, not meta fields.
+    Uses range=1mo for enough historical data.
+    """
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_ticker}?interval=1d&range=1mo"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
             quotes = data["chart"]["result"][0]["indicators"]["quote"][0]
-            closes = [c for c in quotes.get("close", []) if c is not None]
-            if len(closes) < 5:
+            timestamps = data["chart"]["result"][0].get("timestamp", [])
+            closes_all = quotes.get("close", [])
+            closes = [c for c in closes_all if c is not None]
+            if len(closes) < 6:
                 return None
-            week_change = (closes[-1] - closes[0]) / closes[0] * 100
+            # Compare last close vs close 5 trading days ago
+            week_change = (closes[-1] - closes[-6]) / closes[-6] * 100
             return {"week_change_pct": round(week_change, 2)}
     except Exception as e:
         print(f"  [WARN] weekly {yahoo_ticker}: {e}")
