@@ -1,117 +1,84 @@
+<p align="center">
+  <a href="README.zh.md">[CN] Chinese</a>
+  |
+  <a href="README.md">[EN] English</a>
+</p>
+
 # Portfolio Monitor
 
-自动从 Trading212 获取持仓，推送日报和周度操作复盘到 Telegram。
+Automatically fetches Trading212 portfolio and sends daily reports / weekly review summaries to Telegram.
 
-## 功能概览
+[GitHub](https://github.com/caozh502/portfolio-monitor)
 
-| 报告 | 频率 | 文件 | 内容 |
-|------|------|------|------|
-| **Daily Portfolio Review** | 每个交易日 18:00 CEST | `monitor.py` | 当日涨跌、涨幅/跌幅前3、卖出建议、接近高位提醒 |
-| **Weekly Portfolio Review** | 每周六 14:00 CEST | `scripts/weekly_review.py` | 操作复盘（买卖/加仓/减仓）、账户变化、评级、建议 |
+## Features
 
-## 周度操作复盘示例
+| Report | Frequency | File | Content |
+|--------|-----------|------|---------|
+| **Daily Portfolio Review** | Every trading day, 18:00 CEST | `monitor.py` | Daily P&L, top gainers/losers, sell signals, near-high alerts |
+| **Weekly Portfolio Review** | Every Saturday, 14:00 CEST | `scripts/weekly_review.py` | Trade recap (buys/sells/adds/reduces), account changes, rating, suggestions |
 
-```
-📊 第28周 投资操作复盘
-<i>2026-07-10 00:30 CEST</i>
-
-📋 本周操作
-  🟢 火箭实验室(RKLB) 开仓10股
-  📈 英伟达(NVDA) +5股 → 15股
-  📉 特斯拉(TSLA) -3股 → 5股
-
-💰 账户变化
-  总资产 ▼ €92,355 → €90,000 (-2.5%)
-  现金 €55,480 → €53,000
-  现金比例 59%
-
-📌 当前前5持仓
-  Sivers    21.0%  €4.2       1845股  PPL€-2,250
-  标普500ETF   8.8%  €127.09    25股   PPL€+27
-  迈威尔科技    6.3%  $216.6     11股   PPL$-284
-
-🏆 本周评级: B
-  ✅ 新增仓: 火箭实验室
-  ⚠️ 前3持仓偏高，现金比例过大
-
-🎯 下周建议
-  考虑定投宽基ETF，23个标的偏多建议精简
-```
-
-## 文件结构
+## File Structure
 
 ```
 portfolio-monitor/
-├── .github/workflows/
-│   ├── monitor.yml            # Daily Portfolio Review — 工作日16:00 UTC
-│   └── weekly_review.yml      # Weekly Portfolio Review — 周六12:00 UTC
-├── scripts/
-│   └── weekly_review.py       # 周度操作复盘脚本
-├── snapshots/                  # 每周持仓快照（JSON, 保留52周后自动清理）
-│   ├── 2026-W28.json
-│   └── ...
-├── monitor.py                  # 日报脚本：获取数据→分析→推送Telegram
-├── trading212.py               # Trading212 API封装 + 自动ticker解析
-├── README.md
-└── .gitignore
+|-- .github/workflows/
+|   |-- monitor.yml            # Daily Portfolio Review - Mon-Fri 16:00 UTC
+|   +-- weekly_review.yml      # Weekly Portfolio Review - Sat 12:00 UTC
+|-- scripts/
+|   +-- weekly_review.py       # Weekly review script
+|-- snapshots/                  # Weekly portfolio snapshots (JSON, auto-clean 52wks)
+|   |-- 2026-W28.json
+|   +-- ...
+|-- monitor.py                  # Daily report: fetch -> analyze -> Telegram
+|-- trading212.py               # Trading212 API wrapper + auto ticker resolver
+|-- README.md
++-- .gitignore
 ```
 
-## 工作流程
+## How It Works
 
-### 日报 (Daily Portfolio Review)
-1. `trading212.py` 通过 API 获取 Trading212 全部持仓 + 现金余额
-2. 自动解析每个标的的 Yahoo Finance 代码（US→直连，EU→试 `.DE`/`.PA`/`.F` 等）
-3. 获取当日涨跌幅（从实际收盘价数组计算，不依赖 `chartPreviousClose`）、30日最高价
-4. 盈利标的自动计算限价卖出建议
-5. 推送 Telegram（HTML格式）
+### Daily Portfolio Review
+1. Fetch all positions + cash from Trading212 API
+2. Auto-resolve Yahoo Finance tickers (US -> direct, EU -> try .DE/.PA/.F etc.)
+3. Get daily change (computed from actual close array, not chartPreviousClose), 30-day high
+4. Calculate limit-sell suggestions for profitable positions
+5. Push to Telegram (HTML format)
 
-### 周度操作复盘 (Weekly Portfolio Review)
-1. 获取 Trading212 全部持仓 + 现金余额
-2. 保存当前快照至 `snapshots/{周}.json`
-3. 加载上周快照，对比检测：新增/清仓/加仓/减仓
-4. 规则引擎评估本周操作（现金管理、分散度、交易频率等）
-5. 生成操作建议
-6. 推送 Telegram
-7. 自动清理 >52 周的旧快照
+### Weekly Portfolio Review
+1. Fetch all positions + cash from Trading212
+2. Save snapshot to snapshots/{week}.json
+3. Load previous week's snapshot, detect: new/closed/increased/reduced positions
+4. Rule engine evaluates the week (cash management, diversification, trade frequency)
+5. Generate suggestions for next week
+6. Push to Telegram
+7. Auto-clean snapshots older than 52 weeks
 
-## GitHub Secrets 配置
+## GitHub Secrets
 
-| Secret | 说明 |
-|--------|------|
-| `TG_BOT_TOKEN` | Telegram Bot Token |
-| `TG_CHAT_ID` | Telegram Chat ID |
-| `TRADING212_API_KEY` | Trading212 API Key |
-| `TRADING212_API_SECRET` | Trading212 API Secret |
+| Secret | Description |
+|--------|-------------|
+| TG_BOT_TOKEN | Telegram Bot Token |
+| TG_CHAT_ID | Telegram Chat ID |
+| TRADING212_API_KEY | Trading212 API Key |
+| TRADING212_API_SECRET | Trading212 API Secret |
 
-## Ticker 覆盖
+## Ticker Overrides
 
-少数跨市场标的的欧股价格与美股不一致，手动覆盖到美股代码：
+Some cross-listed stocks have different prices on European exchanges vs US. Manual overrides:
 
-| 原始代码 | 覆盖到 | 说明 |
-|---------|--------|------|
+| Raw Ticker | Mapped To | Description |
+|------------|-----------|-------------|
 | 6RJ | RKLB | Rocket Lab |
 | 9MW | MRVL | Marvell Technology |
 | TSFA | TSM | TSMC ADR |
 
-如需添加覆盖，编辑 `trading212.py` 中的 `_TICKER_OVERRIDE` 字典。
+Edit `_TICKER_OVERRIDE` in `trading212.py` to add more.
 
-## 本地测试
+## Snapshot Management
 
-```bash
-# 日报
-cd portfolio-monitor
-TRADING212_API_KEY="xxx" TRADING212_API_SECRET="xxx" \
-TG_BOT_TOKEN="xxx" TG_CHAT_ID="xxx" \
-python monitor.py
+- Weekly snapshots saved to `snapshots/` and committed to GitHub
+- Max **52 weeks** (1 year), oldest auto-deleted
+- ~1KB per snapshot, ~50KB total per year
 
-# 周度操作复盘（需要先跑过一次日报生成快照）
-TRADING212_API_KEY="xxx" TRADING212_API_SECRET="xxx" \
-TG_BOT_TOKEN="xxx" TG_CHAT_ID="xxx" \
-python scripts/weekly_review.py
-```
-
-## 快照管理
-
-- 每周快照自动保存至 `snapshots/` 目录并提交到 GitHub
-- 最多保留 **52 周**（1年），超出自动删除最旧快照
-- 快照格式：JSON，每条约 1KB，一年总计约 50KB
+---
+_Portfolio Monitor - [GitHub](https://github.com/caozh502/portfolio-monitor)_
