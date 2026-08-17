@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 .hermes-tmp.*
 .github/workflows/.hermes-tmp.*
+snapshots/
