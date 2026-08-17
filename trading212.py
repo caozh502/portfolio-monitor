@@ -21,6 +21,7 @@ _TICKER_OVERRIDE = {
     "6RJ": "RKLB",    # Rocket Lab — correct exchange symbol is 6RJ0
     "9MW": "MRVL",    # Marvell
     "TSFA": "TSM",    # TSMC ADR
+    "NPA": "ASTS",    # AST SpaceMobile — T212 lists it as NPA; Yahoo NPA.F is a different company (Ekopark)
 }
 # Cache: resolved Yahoo ticker once found (in-memory, per-run)
 _YAHOO_CACHE: dict[str, str | None] = {}
@@ -65,10 +66,12 @@ def resolve_yahoo_ticker(raw_ticker: str) -> tuple[str | None, str]:
     """
     clean_sym = clean_ticker(raw_ticker)
 
-    # Check override first
+    # Check override first — the override maps to the canonical US ticker for
+    # DATA purposes, but the position's own currency is decided by where T212
+    # trades it (resolve_currency): 6RJ/9MW/TSFA/NPA are Frankfurt-listed EUR.
     if clean_sym in _TICKER_OVERRIDE:
         override = _TICKER_OVERRIDE[clean_sym]
-        result = (override, "USD")
+        result = (override, resolve_currency(raw_ticker))
         return result
 
     cache_key = f"{raw_ticker}|{clean_sym}"

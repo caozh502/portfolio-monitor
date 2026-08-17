@@ -221,8 +221,12 @@ def diff_snapshots(current: dict, previous: dict) -> dict:
     closed_positions = []
     increased_positions = []
     decreased_positions = []
+    fractional_changes = []   # <0.5 share drift (dividend reinvestment, not manual trades)
 
     all_tickers = set(list(cur_pos.keys()) + list(prev_pos.keys()))
+
+    # Positions with fractional drift below this are dividend-reinvest noise, not trades
+    FRACTIONAL_THRESHOLD = 0.5
 
     for t in all_tickers:
         cp = cur_pos.get(t)
@@ -233,18 +237,25 @@ def diff_snapshots(current: dict, previous: dict) -> dict:
             closed_positions.append(pp)
         elif cp and pp:
             qty_diff = cp["qty"] - pp["qty"]
-            if qty_diff > 0.001:
+            if qty_diff > FRACTIONAL_THRESHOLD:
                 increased_positions.append({
                     "ticker": t, "name": cp["name"],
                     "prev_qty": pp["qty"], "new_qty": cp["qty"],
                     "added_qty": round(qty_diff, 4),
                     "currency": cp["currency"],
                 })
-            elif qty_diff < -0.001:
+            elif qty_diff < -FRACTIONAL_THRESHOLD:
                 decreased_positions.append({
                     "ticker": t, "name": cp["name"],
                     "prev_qty": pp["qty"], "new_qty": cp["qty"],
                     "removed_qty": round(-qty_diff, 4),
+                    "currency": cp["currency"],
+                })
+            elif abs(qty_diff) > 0.001:
+                fractional_changes.append({
+                    "ticker": t, "name": cp["name"],
+                    "prev_qty": pp["qty"], "new_qty": cp["qty"],
+                    "diff_qty": round(qty_diff, 4),
                     "currency": cp["currency"],
                 })
 
@@ -282,6 +293,7 @@ def diff_snapshots(current: dict, previous: dict) -> dict:
         "closed_positions": closed_positions,
         "increased": increased_positions,
         "decreased": decreased_positions,
+        "fractional": fractional_changes,
         "weight_changes": weight_changes,
         "prev_total": previous["total_value"],
         "cur_total": current["total_value"],
@@ -347,13 +359,15 @@ def evaluate_trading(diff: dict, current: dict) -> tuple[str, list[str], list[st
         bad.append(f"前3持仓占{top3_weight:.0f}%，注意分散")
         grade_score -= 5
 
-    # 8. Overall direction — did they trade WITH the market?
-    val_change = diff["total_val_pct"]
-    if val_change > 0:
-        good.append(f"总资产增长{val_change:+.1f}%，方向正确")
-        grade_score += 10 if val_change > 5 else 5
-    elif val_change < -5:
-        bad.append(f"总资产下跌{val_change:.1f}%，注意风险敞口")
+    # 8. Overall direction — use REAL P&L change, NOT total value change.
+    #    Total value includes deposits/withdrawals (cash moves), so a big
+    #    "growth" can just be money transferred in, not trading gains.
+    ppl_chg = diff["ppl_change"]
+    if ppl_chg > 0:
+        good.append(f"本周盈亏{ppl_chg:+,.0f}€，方向正确")
+        grade_score += 10 if ppl_chg > 500 else 5
+    elif ppl_chg < -500:
+        bad.append(f"本周盈亏{ppl_chg:+,.0f}€，注意风险敞口")
         grade_score -= 10
 
     # Determine grade
@@ -414,6 +428,12 @@ def build_report(current: dict, previous: dict | None, diff_data: dict | None,
                  for p in diff_data["decreased"]]
         lines.extend(items)
 
+    if diff_data and diff_data.get("fractional"):
+        has_ops = True
+        frac_names = ", ".join(
+            f"{p['name']}({p['ticker']})" for p in diff_data["fractional"])
+        lines.append(f"  🔁 分红再投资碎股: {frac_names}")
+
     if not has_ops:
         lines.append("  ➖ 本周无操作")
     lines.append("")
@@ -423,6 +443,10 @@ def build_report(current: dict, previous: dict | None, diff_data: dict | None,
     if previous and diff_data:
         arrow = "▲" if diff_data["total_val_change"] > 0 else "▼"
         lines.append(f"  总资产 {arrow} €{previous['total_value']:,.0f} → €{current['total_value']:,.0f} ({diff_data['total_val_pct']:+.1f}%)")
+        # Flag deposits separately so growth isn't mistaken for trading gains
+        if abs(diff_data["cash_change"]) > 100:
+            dep = "入金" if diff_data["cash_change"] > 0 else "出金"
+            lines.append(f"  💶 {dep} €{abs(diff_data['cash_change']):,.0f}（已包含在总资产变化中）")
         if abs(diff_data["ppl_change"]) > 0.01:
             ppl_arrow = "▲" if diff_data["ppl_change"] > 0 else "▼"
             lines.append(f"  累计盈亏 {ppl_arrow} €{diff_data['ppl_change']:+,.0f}")
