@@ -53,14 +53,27 @@ portfolio-monitor/
 6. Push to Telegram
 7. Auto-clean snapshots older than 52 weeks
 
-## GitHub Secrets
+## Deployment (VPS — since 2026-08-17)
 
-| Secret | Description |
-|--------|-------------|
-| TG_BOT_TOKEN | Telegram Bot Token |
-| TG_CHAT_ID | Telegram Chat ID |
-| TRADING212_API_KEY | Trading212 API Key |
-| TRADING212_API_SECRET | Trading212 API Secret |
+GitHub Actions workflows are **disabled**; both reports now run on the VPS cron
+(`calebhomelist.duckdns.org`, Europe/Berlin timezone):
+
+```cron
+# Daily close report — 18:00 Berlin (16:00 UTC) weekdays
+0 18 * * 1-5 cd /home/ubuntu/portfolio-monitor && set -a && . ./.env && set +a && /usr/bin/python3 monitor.py >> daily.log 2>&1
+# Weekly review — Sat 14:00 Berlin (12:00 UTC)
+0 14 * * 6 cd /home/ubuntu/portfolio-monitor && set -a && . ./.env && set +a && /usr/bin/python3 scripts/weekly_review.py >> weekly.log 2>&1
+```
+
+Secrets live in `~/portfolio-monitor/.env` (chmod 600): `TG_BOT_TOKEN`, `TG_CHAT_ID`,
+`TRADING212_API_KEY`, `TRADING212_API_SECRET`.
+
+**Privacy**: snapshots are written to `~/portfolio-monitor/snapshots/` on the VPS only.
+`snapshots/` is gitignored. The GitHub history was rewritten with `git filter-repo`
+to purge all previously committed snapshots.
+
+**Update flow**: `cd ~/portfolio-monitor && git pull` (deps unchanged, stdlib only).
+No deploy script needed — cron picks up new code on next run.
 
 ## Ticker Overrides
 
@@ -71,12 +84,13 @@ Some cross-listed stocks have different prices on European exchanges vs US. Manu
 | 6RJ | RKLB | Rocket Lab |
 | 9MW | MRVL | Marvell Technology |
 | TSFA | TSM | TSMC ADR |
+| NPA | ASTS | AST SpaceMobile (Yahoo NPA.F is a different company) |
 
 Edit `_TICKER_OVERRIDE` in `trading212.py` to add more.
 
 ## Snapshot Management
 
-- Weekly snapshots saved to `snapshots/` and committed to GitHub
+- Weekly snapshots saved to `snapshots/` locally on the VPS — **never committed to GitHub** (privacy). The repo itself stays public with no portfolio data in its history.
 - Max **52 weeks** (1 year), oldest auto-deleted
 - ~1KB per snapshot, ~50KB total per year
 
